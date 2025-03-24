@@ -264,10 +264,43 @@ impl AppState {
         ctx: Context,
         req: Option<GetPositionsRequest>,
     ) -> GatewayResult<GetPositionsResponse> {
+        let sub_account = self.resolve_sub_account(ctx.sub_account_id);
         let (all_spot, all_perp) = self
             .client
-            .all_positions(&self.resolve_sub_account(ctx.sub_account_id))
+            .all_positions(&sub_account)
             .await?;
+
+        let mut perps: Vec::<PerpPosition> = Vec::<PerpPosition>::with_capacity(all_perp.len());
+
+        for perp_position in all_perp {
+            let (user, oracle) = tokio::join!(
+            self.client.get_user_account(&sub_account),
+            self.client
+                .oracle_price(MarketId::perp(perp_position.market_index)),
+        );
+
+            let result = calculate_liquidation_price_and_unrealized_pnl(
+                &self.client,
+                &user.unwrap(),
+                perp_position.market_index,
+            ).await.unwrap();
+            let oracle_price = oracle?;
+            let unsettled_pnl = Decimal::new(
+                perp_position
+                    .get_unrealized_pnl(oracle_price)
+                    .unwrap_or_default() as i64,
+                PRICE_DECIMALS,
+            );
+
+            let mut p: PerpPosition = perp_position.into();
+            p.set_extended_info(PerpPositionExtended {
+                liquidation_price: Decimal::new(result.liquidation_price, PRICE_DECIMALS),
+                unrealized_pnl: Decimal::new(result.unrealized_pnl as i64, PRICE_DECIMALS),
+                unsettled_pnl: unsettled_pnl.normalize(),
+                oracle_price: Decimal::new(oracle_price, PRICE_DECIMALS),
+            });
+            perps.push(p);
+        }
 
         // calculating spot token balance requires knowing the 'spot market account' data
         let filtered_spot_positions: Vec<&drift_idl::types::SpotPosition> = all_spot
@@ -300,7 +333,7 @@ impl AppState {
 
         Ok(GetPositionsResponse {
             spot: filtered_spot_positions,
-            perp: all_perp
+            perp: perps
                 .into_iter()
                 .filter(|p| {
                     if let Some(GetPositionsRequest { ref market }) = req {
@@ -310,7 +343,6 @@ impl AppState {
                         true
                     }
                 })
-                .map(Into::into)
                 .collect(),
         })
     }

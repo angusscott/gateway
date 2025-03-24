@@ -138,7 +138,7 @@ impl SpotPosition {
 pub struct PerpPosition {
     amount: Decimal,
     average_entry: Decimal,
-    market_index: u16,
+    pub(crate) market_index: u16,
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
     extended: Option<PerpPositionExtended>,
 }
